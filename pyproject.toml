@@ -23,6 +23,7 @@ classifiers=[
 
 dependencies = [
     'accelerate',
+    'comet_ml',
     'einx>=0.3.0',
     'einops>=0.8.0',
     'einx>=0.3.0',

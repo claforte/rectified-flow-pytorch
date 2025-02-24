@@ -5,11 +5,14 @@ from copy import deepcopy
 from collections import namedtuple
 from typing import Tuple, List, Literal, Callable
 
+import comet_ml
+
 import torch
 from torch import Tensor
 from torch import nn, pi, from_numpy
 from torch.nn import Module, ModuleList
 import torch.nn.functional as F
+from torchvision import transforms
 
 from torchdiffeq import odeint
 
@@ -26,6 +29,8 @@ from hyper_connections.hyper_connections_channel_first import get_init_and_expan
 from scipy.optimize import linear_sum_assignment
 
 from rectified_flow_pytorch.nano_flow import NanoFlow
+
+
 
 # helpers
 
@@ -879,7 +884,7 @@ class Trainer(Module):
         dataset: dict | Dataset,
         num_train_steps = 70_000,
         learning_rate = 3e-4,
-        batch_size = 16,
+        batch_size = 8, # claforte: was 16
         checkpoints_folder: str = './checkpoints',
         results_folder: str = './results',
         save_results_every: int = 100,
@@ -892,6 +897,7 @@ class Trainer(Module):
     ):
         super().__init__()
         self.accelerator = Accelerator(**accelerate_kwargs)
+        self.accelerator.init_trackers(project_name="rectified_flow_oxford")
 
         if isinstance(dataset, dict):
             dataset = ImageDataset(**dataset)
@@ -976,8 +982,14 @@ class Trainer(Module):
     def log(self, *args, **kwargs):
         return self.accelerator.log(*args, **kwargs)
 
-    def log_images(self, *args, **kwargs):
-        return self.accelerator.log(*args, **kwargs)
+    def log_images(self, images, step=None, **kwargs):
+        """Log images to tracking service (like Comet ML)
+        
+            Args:
+                images: Tensor of images to log
+                step: Current training step"""
+        experiment = self.accelerator.get_tracker("comet_ml").tracker
+        experiment.log_image(transforms.ToPILImage()(images), "images", step=step, **kwargs)
 
     def sample(self, fname):
         eval_model = default(self.ema_model, self.model)
@@ -1007,7 +1019,10 @@ class Trainer(Module):
 
             if self.return_loss_breakdown:
                 loss, loss_breakdown = self.model(data, return_loss_breakdown = True)
-                self.log(loss_breakdown._asdict(), step = step)
+                
+                dic = loss_breakdown._asdict()
+                dic['train/loss'] = dic['total'].item()
+                self.log(dic, step=step)
             else:
                 loss = self.model(data)
 
@@ -1032,11 +1047,13 @@ class Trainer(Module):
 
                     sampled = self.sample(fname=str(self.results_folder / f'results.{step}.png'))
 
-                    self.log_images(sampled, step = step)
+                    self.log_images(sampled, step=step)
 
                 if divisible_by(step, self.checkpoint_every):
                     self.save(f'checkpoint.{step}.pt')
 
             self.accelerator.wait_for_everyone()
+
+        self.accelerator.end_training()
 
         print('training complete')

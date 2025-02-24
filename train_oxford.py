@@ -42,7 +42,8 @@ trainer = Trainer(
     rectified_flow,
     dataset = flowers_dataset,
     num_train_steps = 70_000,
-    results_folder = './results'   # samples will be saved periodically to this folder
+    results_folder = './results',   # samples will be saved periodically to this folder
+    accelerate_kwargs={'log_with':'comet_ml'}
 )
 
 trainer()
