@@ -7,6 +7,8 @@ from typing import Tuple, List, Literal, Callable
 
 import comet_ml
 
+import numpy as np
+
 import torch
 from torch import Tensor
 from torch import nn, pi, from_numpy
@@ -18,7 +20,7 @@ from torchdiffeq import odeint
 
 import torchvision
 from torchvision.utils import save_image
-from torchvision.models import VGG16_Weights
+from torchvision.models import VGG16_Weights, inception_v3
 
 import einx
 from einops import einsum, reduce, rearrange, repeat
@@ -26,6 +28,7 @@ from einops.layers.torch import Rearrange
 
 from hyper_connections.hyper_connections_channel_first import get_init_and_expand_reduce_stream_functions, Residual
 
+from scipy import linalg
 from scipy.optimize import linear_sum_assignment
 
 from rectified_flow_pytorch.nano_flow import NanoFlow
@@ -864,6 +867,48 @@ class ImageDataset(Dataset):
         img = Image.open(path)
         return self.transform(img)
 
+def calculate_fid(real_images, generated_images, inception=None, device='cuda'):
+    """Calculate FID between real and generated images"""
+    # Load inception model if not provided
+    if inception is None:
+        inception = models.inception_v3(pretrained=True, transform_input=False)
+        inception.fc = torch.nn.Identity()  # Remove final FC layer
+        inception.eval()
+        inception = inception.to(device)
+    
+    # Define preprocessing function - resize to 299x299 for Inception
+    def preprocess(images):
+        # Resize small images to 299x299 (required by Inception)
+        if images.shape[-1] < 299:
+            images = F.interpolate(images, size=(299, 299), mode='bilinear', align_corners=False)
+        return images
+    
+    # Extract features
+    def get_features(images):
+        features = []
+        with torch.no_grad():
+            for i in range(0, len(images), 32):  # Process in batches
+                batch = preprocess(images[i:i+32].to(device))
+                feature = inception(batch).detach().cpu().numpy()
+                features.append(feature)
+        return np.concatenate(features)
+    
+    real_features = get_features(real_images)
+    gen_features = get_features(generated_images)
+    
+    # Calculate mean and covariance
+    mu1, sigma1 = real_features.mean(axis=0), np.cov(real_features, rowvar=False)
+    mu2, sigma2 = gen_features.mean(axis=0), np.cov(gen_features, rowvar=False)
+    
+    # Calculate FID
+    ssdiff = np.sum((mu1 - mu2) ** 2)
+    covmean = linalg.sqrtm(sigma1.dot(sigma2))
+    if np.iscomplexobj(covmean):
+        covmean = covmean.real
+    
+    fid = ssdiff + np.trace(sigma1 + sigma2 - 2 * covmean)
+    return float(fid)
+
 # trainer
 
 from torch.optim import Adam
@@ -893,7 +938,10 @@ class Trainer(Module):
         adam_kwargs: dict = dict(),
         accelerate_kwargs: dict = dict(),
         ema_kwargs: dict = dict(),
-        use_ema = True
+        use_ema = True,
+        calculate_fid = False,
+        fid_every = 100,
+        fid_samples = 100
     ):
         super().__init__()
         self.accelerator = Accelerator(**accelerate_kwargs)
@@ -914,6 +962,10 @@ class Trainer(Module):
 
         self.use_ema = use_ema
         self.ema_model = None
+
+        self.calculate_fid = calculate_fid
+        self.fid_every = fid_every
+        self.fid_samples = fid_samples
 
         if self.is_main and use_ema:
             self.ema_model = EMA(
@@ -952,6 +1004,26 @@ class Trainer(Module):
 
         assert self.checkpoints_folder.is_dir()
         assert self.results_folder.is_dir()
+
+        if self.calculate_fid and self.is_main:
+            self.inception = inception_v3(pretrained=True, transform_input=False)
+            self.inception.fc = torch.nn.Identity()
+            self.inception.eval()
+            self.inception.to(self.accelerator.device)
+            
+            # Get real images for FID calculation
+            self.real_images = []
+            dl = iter(self.dl)
+            for _ in range(min(10, len(self.dl))):
+                try:
+                    batch = next(dl)
+                    self.real_images.append(batch)
+                except StopIteration:
+                    break
+            self.real_images = torch.cat(self.real_images, dim=0)[:self.fid_samples]
+        else:
+            self.inception = None
+            self.real_images = None
 
     @property
     def is_main(self):
@@ -1007,10 +1079,10 @@ class Trainer(Module):
         return sampled
 
     def forward(self):
-        import time  # Add import at top of function
+        import time
         
         dl = cycle(self.dl)
-        start_time = time.time()  # Track start time
+        start_time = time.time()
         steps_since_last_timing = 0
 
         for ind in range(self.num_train_steps):
@@ -1057,6 +1129,26 @@ class Trainer(Module):
                 if divisible_by(step, self.save_results_every):
                     sampled = self.sample(fname=str(self.results_folder / f'results.{step}.png'))
                     self.log_images(sampled, step=step)
+                    
+                # Calculate FID if enabled
+                if self.calculate_fid and divisible_by(step, self.fid_every):
+                    # Generate images for FID calculation
+                    eval_model = default(self.ema_model, self.model)
+                    with torch.no_grad():
+                        generated_images = eval_model.sample(
+                            batch_size=min(self.fid_samples, len(self.real_images)),
+                            data_shape=self.real_images.shape[1:]
+                        )
+                    
+                    # Calculate and log FID
+                    fid_score = calculate_fid(
+                        self.real_images, 
+                        generated_images,
+                        inception=self.inception, 
+                        device=self.accelerator.device
+                    )
+                    self.log({"metrics/fid": fid_score}, step=step)
+                    self.accelerator.print(f"[{step}] FID: {fid_score:.4f}")
 
                 if divisible_by(step, self.checkpoint_every):
                     self.save(f'checkpoint.{step}.pt')

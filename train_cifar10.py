@@ -35,6 +35,7 @@ def main():
         channels=3,  # RGB images
         dim_mults=(1, 2, 4),  # Smaller multipliers for low-res images
     )
+    model = torch.compile(model, backend="inductor", mode="default", fullgraph=True, dynamic=False)
 
     rectified_flow = RectifiedFlow(model)
 
@@ -45,7 +46,9 @@ def main():
         num_train_steps=50_000,
         results_folder='./results/cifar10',
         checkpoints_folder='./checkpoints/cifar10',
-        accelerate_kwargs={'log_with':'comet_ml'}
+        accelerate_kwargs={'log_with':'comet_ml'},
+        calculate_fid=True,
+        fid_every=100
     )
 
     trainer()
