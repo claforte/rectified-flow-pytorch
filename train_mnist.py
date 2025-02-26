@@ -35,6 +35,7 @@ def main():
         channels=1,  # Grayscale images
         dim_mults=(1, 2, 4),  # Smaller multipliers for low-res images
     )
+    model = torch.compile(model, backend="inductor", mode="default", fullgraph=True, dynamic=False)
 
     rectified_flow = RectifiedFlow(model)
 

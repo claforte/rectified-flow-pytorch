@@ -1007,11 +1007,15 @@ class Trainer(Module):
         return sampled
 
     def forward(self):
-
+        import time  # Add import at top of function
+        
         dl = cycle(self.dl)
+        start_time = time.time()  # Track start time
+        steps_since_last_timing = 0
 
         for ind in range(self.num_train_steps):
             step = ind + 1
+            steps_since_last_timing += 1
 
             self.model.train()
 
@@ -1042,11 +1046,16 @@ class Trainer(Module):
             self.accelerator.wait_for_everyone()
 
             if self.is_main:
+                # Calculate and log timing every 100 steps
+                if divisible_by(step, 100):
+                    end_time = time.time()
+                    time_per_100_steps = end_time - start_time
+                    self.log({"train/time_per_100_steps": time_per_100_steps}, step=step)
+                    self.accelerator.print(f"[{step}] 100 steps took {time_per_100_steps:.2f} seconds")
+                    start_time = time.time()  # Reset timer
 
                 if divisible_by(step, self.save_results_every):
-
                     sampled = self.sample(fname=str(self.results_folder / f'results.{step}.png'))
-
                     self.log_images(sampled, step=step)
 
                 if divisible_by(step, self.checkpoint_every):
