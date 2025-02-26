@@ -164,3 +164,6 @@ cython_debug/
 venv_rf/
 results/
 checkpoints/
+data/cifar-10*
+data/MNIST
+
